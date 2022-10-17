@@ -41,14 +41,14 @@ func NewPortalGun() portalGun {
 }
 
 // Portal opens a portal from your local port to whichever port you select
-func (pg *portalGun) Portal(hopperApp string, hopperService string, port int) error {
-	tasks, err := pg.getTasksForService("staging", hopperApp, hopperService)
+func (pg *portalGun) Portal(ctx context.Context, hopperApp string, hopperService string, port int) error {
+	tasks, err := pg.getTasksForService(ctx, "staging", hopperApp, hopperService)
 	if err != nil {
 		log.Print(err)
 		return err
 	}
 
-	portMappings, err := pg.getPortMappings(tasks, "staging")
+	portMappings, err := pg.getPortMappings(ctx, tasks, "staging")
 	prompt := promptui.Select{
 		Label: "Select the task to port forward to",
 		Items: portMappings,
@@ -59,7 +59,7 @@ func (pg *portalGun) Portal(hopperApp string, hopperService string, port int) er
 		return err
 	}
 
-	err = startSSMPortForward(port, portMappings[i])
+	err = startSSMPortForward(ctx, port, portMappings[i])
 	if err != nil {
 		log.Print(err)
 		return err
@@ -69,9 +69,9 @@ func (pg *portalGun) Portal(hopperApp string, hopperService string, port int) er
 
 // getTasksForService gets all the tasks associated with the given service name in the given cluster
 // Currently only the staging cluster is supported.
-func (pg *portalGun) getTasksForService(cluster string, app string, service string) ([]types.Task, error) {
+func (pg *portalGun) getTasksForService(ctx context.Context, cluster string, app string, service string) ([]types.Task, error) {
 	serviceName := fmt.Sprintf("%s-%s", app, service)
-	listTasksOutput, err := pg.ecsClient.ListTasks(context.Background(), &ecs.ListTasksInput{
+	listTasksOutput, err := pg.ecsClient.ListTasks(ctx, &ecs.ListTasksInput{
 		Cluster:       &cluster,
 		DesiredStatus: types.DesiredStatusRunning,
 		ServiceName:   &serviceName,
@@ -86,7 +86,7 @@ func (pg *portalGun) getTasksForService(cluster string, app string, service stri
 
 	tasks := make([]types.Task, len(taskarns))
 	for i, arn := range taskarns {
-		describeTasksOutput, err := pg.ecsClient.DescribeTasks(context.Background(), &ecs.DescribeTasksInput{
+		describeTasksOutput, err := pg.ecsClient.DescribeTasks(ctx, &ecs.DescribeTasksInput{
 			Tasks:   []string{arn},
 			Cluster: &cluster,
 		})
@@ -105,10 +105,10 @@ func (pg *portalGun) getTasksForService(cluster string, app string, service stri
 }
 
 // getPortMappings joins a task with the EC2 instance running it and the containers running on that EC2 instance.
-func (pg *portalGun) getPortMappings(tasks []types.Task, cluster string) ([]portMapping, error) {
+func (pg *portalGun) getPortMappings(ctx context.Context, tasks []types.Task, cluster string) ([]portMapping, error) {
 	portMappings := make([]portMapping, 0)
 	for _, task := range tasks {
-		ec2InstanceID, err := pg.getEC2InstanceIDForTask(task, cluster)
+		ec2InstanceID, err := pg.getEC2InstanceIDForTask(ctx, task, cluster)
 		if err != nil {
 			return nil, err
 		}
@@ -126,8 +126,8 @@ func (pg *portalGun) getPortMappings(tasks []types.Task, cluster string) ([]port
 	return portMappings, nil
 }
 
-func (pg *portalGun) getEC2InstanceIDForTask(task types.Task, cluster string) (string, error) {
-	describeContainerInstancesOutput, err := pg.ecsClient.DescribeContainerInstances(context.Background(), &ecs.DescribeContainerInstancesInput{
+func (pg *portalGun) getEC2InstanceIDForTask(ctx context.Context, task types.Task, cluster string) (string, error) {
+	describeContainerInstancesOutput, err := pg.ecsClient.DescribeContainerInstances(ctx, &ecs.DescribeContainerInstancesInput{
 		ContainerInstances: []string{*task.ContainerInstanceArn},
 		Cluster:            &cluster,
 	})
@@ -152,7 +152,7 @@ func (pg *portalGun) getEC2InstanceIDForTask(task types.Task, cluster string) (s
 }
 
 // startSSMPortForward starts a port forwarding session from localPort to the selected EC2 instance.
-func startSSMPortForward(localPort int, mapping portMapping) error {
+func startSSMPortForward(ctx context.Context, localPort int, mapping portMapping) error {
 	ssmDocumentName := "DeliverooSSMPortForward"
 	params := make(map[string][]string)
 	params["portNumber"] = []string{strconv.Itoa(int(mapping.host))}
@@ -167,7 +167,7 @@ func startSSMPortForward(localPort int, mapping portMapping) error {
 		return err
 	}
 
-	cmd := exec.Command("aws", "ssm", "start-session", "--target", mapping.ec2InstanceID, "--document-name", ssmDocumentName, "--parameters", buffer.String())
+	cmd := exec.CommandContext(ctx, "aws", "ssm", "start-session", "--target", mapping.ec2InstanceID, "--document-name", ssmDocumentName, "--parameters", buffer.String())
 	stdout, err := cmd.StdoutPipe()
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -176,14 +176,13 @@ func startSSMPortForward(localPort int, mapping portMapping) error {
 
 	err = cmd.Start()
 	if err != nil {
-		fmt.Println(err)
+		return err
 	}
 
 	stdoutScanner := bufio.NewScanner(stdout)
 	stderrScanner := bufio.NewScanner(stderr)
-	fmt.Println("Blocking in here A")
 
-	go func() error {
+	go func() {
 		for stdoutScanner.Scan() || stderrScanner.Scan() {
 			t1 := stdoutScanner.Text()
 			t2 := stderrScanner.Text()
@@ -194,15 +193,9 @@ func startSSMPortForward(localPort int, mapping portMapping) error {
 				fmt.Println(t2)
 			}
 		}
-		err = cmd.Wait()
-		if err != nil {
-			fmt.Println("Blocking in here C")
-			return err
+		if err = cmd.Wait(); err != nil {
+			fmt.Printf("Err with cmd execution: %v\n", err)
 		}
-		fmt.Println("Blocking in here D")
-
-		return nil
 	}()
-
 	return nil
 }

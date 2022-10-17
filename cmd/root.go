@@ -6,6 +6,8 @@ import (
 	"github.com/deliveroo/jing-rpc/internal"
 	"github.com/spf13/cobra"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
@@ -25,18 +27,32 @@ You provide the Hopper App and Service name, and portal-gun will track down all 
 and where they're running.`,
 
 	RunE: func(cmd *cobra.Command, args []string) error {
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		go func() {
+			<-signals
+			fmt.Println("Received context cancellation signal")
+			cancel()
+			fmt.Println("Context cancelled")
+		}()
 
 		pg := internal.NewPortalGun()
-		ctx := context.Background()
 
-		err := pg.Portal(hopperApp, hopperService, forwardPort)
+		err := pg.Portal(ctx, hopperApp, hopperService, forwardPort)
 		if err != nil {
-
+			fmt.Printf("Failed to establish session manager port forwarding: %v", err)
+			return err
 		}
-
+		// est. time for SSM starts up the session. Alternatively can listen to this signal:
+		// https://github.com/aws/session-manager-plugin/blob/c523002ee02c8b68983ad05042ed52c44d867952/src/sessionmanagerplugin/session/portsession/muxportforwarding.go#L257
+		// But it's more fragile
 		time.Sleep(10 * time.Second)
+
 		if err := internal.DialGrpcUi(ctx, forwardPort, webPort); err != nil {
-			fmt.Printf("failed to dial grpc ui %v", err)
+			fmt.Printf("Failed to dial grpc ui %v", err)
 			return err
 		}
 		return nil
