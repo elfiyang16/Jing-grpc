@@ -6,8 +6,6 @@ import (
 	"github.com/deliveroo/jing-rpc/internal"
 	"github.com/spf13/cobra"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 )
 
@@ -27,17 +25,8 @@ You provide the Hopper App and Service name, and portal-gun will track down all 
 and where they're running.`,
 
 	RunE: func(cmd *cobra.Command, args []string) error {
-		signals := make(chan os.Signal, 1)
-		signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-
-		go func() {
-			<-signals
-			fmt.Println("Received context cancellation signal")
-			cancel()
-			fmt.Println("Context cancelled")
-		}()
 
 		pg := internal.NewPortalGun()
 
