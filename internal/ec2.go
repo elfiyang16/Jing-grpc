@@ -7,13 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
+	"strconv"
+
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 	"github.com/aws/aws-sdk-go-v2/service/ecs/types"
 	"github.com/manifoldco/promptui"
-	"log"
-	"os/exec"
-	"strconv"
 )
 
 type portMapping struct {
@@ -34,18 +34,17 @@ type portalGun struct {
 func NewPortalGun() portalGun {
 	cfg, err := config.LoadDefaultConfig(context.Background())
 	if err != nil {
-		log.Print(err)
+		fmt.Println(err)
 	}
 	ecsClient := ecs.NewFromConfig(cfg)
 	return portalGun{ecsClient: ecsClient}
 }
 
 // Portal opens a portal from your local port to whichever port you select
-func (pg *portalGun) Portal(ctx context.Context, hopperApp string, hopperService string, port int) error {
+func (pg *portalGun) Portal(ctx context.Context, hopperApp string, hopperService string, port int) (<-chan string, error) {
 	tasks, err := pg.getTasksForService(ctx, "staging", hopperApp, hopperService)
 	if err != nil {
-		log.Print(err)
-		return err
+		return nil, err
 	}
 
 	portMappings, err := pg.getPortMappings(ctx, tasks, "staging")
@@ -55,16 +54,14 @@ func (pg *portalGun) Portal(ctx context.Context, hopperApp string, hopperService
 	}
 	i, _, err := prompt.Run()
 	if err != nil {
-		log.Print(err)
-		return err
+		return nil, err
 	}
 
-	err = startSSMPortForward(ctx, port, portMappings[i])
+	msgStream, err := startSSMPortForward(ctx, port, portMappings[i])
 	if err != nil {
-		log.Print(err)
-		return err
+		return nil, err
 	}
-	return nil
+	return msgStream, nil
 }
 
 // getTasksForService gets all the tasks associated with the given service name in the given cluster
@@ -152,50 +149,53 @@ func (pg *portalGun) getEC2InstanceIDForTask(ctx context.Context, task types.Tas
 }
 
 // startSSMPortForward starts a port forwarding session from localPort to the selected EC2 instance.
-func startSSMPortForward(ctx context.Context, localPort int, mapping portMapping) error {
+func startSSMPortForward(ctx context.Context, localPort int, mapping portMapping) (<-chan string, error) {
 	ssmDocumentName := "DeliverooSSMPortForward"
 	params := make(map[string][]string)
 	params["portNumber"] = []string{strconv.Itoa(int(mapping.host))}
 	params["localPortNumber"] = []string{strconv.Itoa(localPort)}
 	jsonParams, err := json.Marshal(params)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	buffer := bytes.Buffer{}
 	_, err = buffer.Write(jsonParams)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
 	cmd := exec.CommandContext(ctx, "aws", "ssm", "start-session", "--target", mapping.ec2InstanceID, "--document-name", ssmDocumentName, "--parameters", buffer.String())
 	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		fmt.Println(err)
+		return nil, err
 	}
 
 	err = cmd.Start()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	stdoutScanner := bufio.NewScanner(stdout)
 	stderrScanner := bufio.NewScanner(stderr)
-
+	msgStream := make(chan string)
 	go func() {
+		defer close(msgStream)
 		for stdoutScanner.Scan() || stderrScanner.Scan() {
 			t1 := stdoutScanner.Text()
 			t2 := stderrScanner.Text()
+
 			if t1 != "" {
-				fmt.Println(t1)
+				msgStream <- t1
 			}
 			if t2 != "" {
-				fmt.Println(t2)
+				msgStream <- t2
+				break
 			}
 		}
-		if err = cmd.Wait(); err != nil {
-			fmt.Printf("Err with cmd execution: %v\n", err)
-		}
+		fmt.Printf("Cmd quit")
 	}()
-	return nil
+	return msgStream, nil
 }

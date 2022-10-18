@@ -3,11 +3,11 @@ package internal
 import (
 	"context"
 	"fmt"
-	"google.golang.org/grpc/credentials/insecure"
 	"net/http"
 
 	"github.com/fullstorydev/grpcui/standalone"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 func DialGrpcUi(ctx context.Context, forwardPort, webPort int) error {
